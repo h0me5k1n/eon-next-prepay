@@ -1,0 +1,61 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect E.ON Next",
+        "description": "Paste a refresh token from a logged-in eonnext.com session. Run `tools/get_refresh_token.py` from the integration's repository to get one.",
+        "data": { "refresh_token": "Refresh token" }
+      },
+      "reauth_confirm": {
+        "title": "E.ON Next login expired",
+        "description": "The saved login no longer works. Log in to eonnext.com again and paste the new refresh token.",
+        "data": { "refresh_token": "Refresh token" }
+      },
+      "reconfigure": {
+        "title": "Replace refresh token",
+        "description": "Paste a new refresh token from a logged-in eonnext.com session.",
+        "data": { "refresh_token": "Refresh token" }
+      }
+    },
+    "error": {
+      "invalid_auth": "E.ON Next rejected the refresh token. It may have expired or already been used.",
+      "cannot_connect": "Could not reach E.ON Next. Check the logs for details.",
+      "no_prepay_meters": "No smart meters in prepayment mode were found on this account."
+    },
+    "abort": {
+      "already_configured": "This E.ON Next account is already set up.",
+      "reauth_successful": "Login updated.",
+      "reconfigure_successful": "Refresh token updated.",
+      "wrong_account": "That refresh token belongs to a different E.ON Next account."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "E.ON Next Prepay options",
+        "data": {
+          "low_credit_threshold": "Low credit threshold",
+          "scan_interval": "Update interval"
+        }
+      }
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "low_credit": { "name": "Low credit" }
+    },
+    "sensor": {
+      "credit": { "name": "Credit" },
+      "debt": { "name": "Debt" },
+      "emergency_credit": { "name": "Emergency credit" },
+      "balance_updated": { "name": "Balance updated" },
+      "weekly_debt_recovery": { "name": "Weekly debt recovery" },
+      "last_top_up": { "name": "Last top-up" },
+      "last_top_up_date": { "name": "Last top-up date" },
+      "auto_top_up": { "name": "Auto top-up amount" },
+      "usage_today": { "name": "Usage today" },
+      "cost_today": { "name": "Cost today" },
+      "usage_last_day": { "name": "Usage (last full day)" }
+    }
+  }
+}

@@ -1,0 +1,17 @@
+__pycache__/
+.venv/
+.pytest_cache/
+*.egg-info/
+.ruff_cache/
+.coverage
+
+# never commit credentials or captured tokens
+.env
+.env.*
+*.token
+*.tmp
+*refresh_token*.txt
+secrets.yaml
+
+# HA diagnostics downloads - redacted, but contain balances and usage
+config_entry-eon_next_prepay-*.json
