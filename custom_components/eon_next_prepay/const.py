@@ -12,7 +12,13 @@ AUTH0_CLIENT_ID = "OrFeFacHUoXK2afczePYMLCRMXpwRxzW"  # gitleaks:allow
 API_BASE_URL = "https://api.eonnext-kraken.energy/v1"
 GRAPHQL_URL = f"{API_BASE_URL}/graphql/"
 
+# entry data holds exactly one of these: the API key once the user has one,
+# otherwise an Auth0 refresh token
+CONF_API_KEY = "api_key"
 CONF_REFRESH_TOKEN = "refresh_token"
+# config flow fields
+CONF_TOKEN = "token"
+CONF_CREATE_API_KEY = "create_api_key"
 CONF_LOW_CREDIT_THRESHOLD = "low_credit_threshold"
 CONF_SCAN_INTERVAL = "scan_interval"
 
@@ -22,3 +28,6 @@ MIN_SCAN_INTERVAL = 10  # minutes
 
 FUEL_ELECTRICITY = "electricity"
 FUEL_GAS = "gas"
+
+# repair issue offering refresh-token entries a switch to an API key
+ISSUE_SWITCH_TO_API_KEY = "switch_to_api_key"
