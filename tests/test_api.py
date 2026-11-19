@@ -9,10 +9,12 @@ import pytest
 
 from custom_components.eon_next_prepay.api import (
     EonNextApiError,
+    EonNextApiKeyExists,
     EonNextAuthError,
     EonNextClient,
+    looks_like_api_key,
 )
-from custom_components.eon_next_prepay.const import AUTH0_TOKEN_URL
+from custom_components.eon_next_prepay.const import AUTH0_TOKEN_URL, GRAPHQL_URL
 
 from .conftest import make_jwt
 
@@ -158,3 +160,107 @@ async def test_daily_consumption_grouped_by_serial() -> None:
     assert result["G1"][0]["value"] == "1.5"
     assert result["G2"] == []
     assert all(method == "POST" for method, _, _ in session.calls)
+
+
+def kraken_error(code: str) -> tuple[int, dict]:
+    return 200, {
+        "errors": [{"message": "Invalid data.", "extensions": {"errorCode": code}}],
+        "data": {"obtainKrakenToken": None},
+    }
+
+
+async def test_api_key_login_uses_jwt_prefix_and_never_touches_auth0() -> None:
+    kraken_jwt = make_jwt()
+
+    def handler(method: str, url: str, kwargs: dict) -> tuple[int, Any]:
+        assert url == GRAPHQL_URL
+        if "obtainKrakenToken" in kwargs["json"]["query"]:
+            assert "headers" not in kwargs
+            assert kwargs["json"]["variables"] == {"input": {"APIKey": "sk_live_x"}}
+            return 200, {"data": {"obtainKrakenToken": {"token": kraken_jwt}}}
+        assert kwargs["headers"]["Authorization"] == f"JWT {kraken_jwt}"
+        return 200, {"data": {"viewer": {"accounts": []}}}
+
+    session = FakeSession(handler)
+    client = EonNextClient(session, api_key="sk_live_x")  # type: ignore[arg-type]
+    assert client.uses_api_key
+    assert await client.async_get_accounts() == []
+    assert await client.async_get_accounts() == []
+    logins = [c for c in session.calls if "obtainKrakenToken" in c[2]["json"]["query"]]
+    assert len(logins) == 1
+
+
+async def test_expired_kraken_token_is_renewed_with_the_key() -> None:
+    tokens = iter([make_jwt(exp_in=30), make_jwt()])
+
+    def handler(method: str, url: str, kwargs: dict) -> tuple[int, Any]:
+        if "obtainKrakenToken" in kwargs["json"]["query"]:
+            return 200, {"data": {"obtainKrakenToken": {"token": next(tokens)}}}
+        return 200, {"data": {}}
+
+    session = FakeSession(handler)
+    client = EonNextClient(session, api_key="sk_live_x")  # type: ignore[arg-type]
+    await client.graphql("{ a }")
+    await client.graphql("{ b }")
+    logins = [c for c in session.calls if "obtainKrakenToken" in c[2]["json"]["query"]]
+    assert len(logins) == 2
+
+
+async def test_rejected_api_key_raises_auth_error() -> None:
+    # KT-CT-1139 is what E.ON returns for an unknown key
+    client = EonNextClient(FakeSession(lambda m, u, k: kraken_error("KT-CT-1139")), api_key="sk_live_x")  # type: ignore[arg-type]
+    with pytest.raises(EonNextAuthError):
+        await client.async_get_accounts()
+
+
+async def test_other_api_key_login_errors_are_retryable() -> None:
+    # e.g. rate limiting must not send the user to re-authenticate
+    client = EonNextClient(FakeSession(lambda m, u, k: kraken_error("KT-CT-1199")), api_key="sk_live_x")  # type: ignore[arg-type]
+    with pytest.raises(EonNextApiError) as err:
+        await client.async_get_accounts()
+    assert not isinstance(err.value, EonNextAuthError)
+    assert err.value.codes == {"KT-CT-1199"}
+
+
+def key_handler(existing: str | None, calls: list[str]):
+    def handler(method: str, url: str, kwargs: dict) -> tuple[int, Any]:
+        if url == AUTH0_TOKEN_URL:
+            return auth0_ok(make_jwt(), "rt-2")
+        query = kwargs["json"]["query"]
+        if "liveSecretKey" in query:
+            calls.append("check")
+            return 200, {"data": {"viewer": {"liveSecretKey": existing}}}
+        assert "regenerateSecretKey" in query
+        calls.append("create")
+        return 200, {"data": {"regenerateSecretKey": {"key": "sk_live_new"}}}
+
+    return handler
+
+
+async def test_create_api_key_when_none_exists() -> None:
+    calls: list[str] = []
+    client = EonNextClient(FakeSession(key_handler(None, calls)), "rt-1")  # type: ignore[arg-type]
+    assert await client.async_create_api_key() == "sk_live_new"
+    assert calls == ["check", "create"]
+
+
+async def test_create_api_key_refuses_to_replace_existing_key() -> None:
+    calls: list[str] = []
+    client = EonNextClient(FakeSession(key_handler("sk_live_****abcd", calls)), "rt-1")  # type: ignore[arg-type]
+    with pytest.raises(EonNextApiKeyExists) as err:
+        await client.async_create_api_key()
+    assert err.value.masked == "sk_live_****abcd"
+    assert calls == ["check"]
+
+    assert await client.async_create_api_key(replace=True) == "sk_live_new"
+    assert calls == ["check", "create"]
+
+
+def test_looks_like_api_key() -> None:
+    assert looks_like_api_key(" sk_live_abc ")
+    assert not looks_like_api_key("v1.Mabc-refresh-token")
+
+
+def test_client_needs_a_credential() -> None:
+    with pytest.raises(ValueError):
+        EonNextClient(FakeSession(lambda m, u, k: (200, {})))  # type: ignore[arg-type]

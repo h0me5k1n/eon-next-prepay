@@ -17,12 +17,18 @@ from pytest_homeassistant_custom_component.common import (
     async_fire_time_changed,
 )
 
+from homeassistant.components.repairs import repairs_flow_manager
+from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.helpers import issue_registry as ir
+from homeassistant.setup import async_setup_component
+
 from custom_components.eon_next_prepay.api import (
     EonNextApiError,
+    EonNextApiKeyExists,
     EonNextAuthError,
     EonNextClient,
 )
-from custom_components.eon_next_prepay.const import CONF_REFRESH_TOKEN, DOMAIN
+from custom_components.eon_next_prepay.const import CONF_API_KEY, CONF_REFRESH_TOKEN, DOMAIN
 
 from .conftest import ACCOUNT, ELEC_DEVICE, GAS_DEVICE, accounts_payload
 
@@ -54,6 +60,9 @@ class FakeApi:
         self.rotate_to: str | None = None
         self.accounts_error: Exception | None = None
         self.consumption_error: Exception | None = None
+        self.existing_key: str | None = None
+        self.created_keys: list[bool] = []
+        self.clients: list[EonNextClient] = []
         self.auto_topups: list[dict] = [
             {"topupAmount": 1500, "effectiveFrom": "2026-01-01T00:00:00Z", "effectiveTo": "2026-02-01T00:00:00Z"},
             {"topupAmount": 2500, "effectiveFrom": "2026-02-01T00:00:00Z", "effectiveTo": None},
@@ -63,6 +72,8 @@ class FakeApi:
         api = self
 
         async def get_accounts(client: EonNextClient):
+            if client not in api.clients:
+                api.clients.append(client)
             if api.accounts_error:
                 raise api.accounts_error
             if api.rotate_to and client._on_refresh_token:
@@ -97,8 +108,15 @@ class FakeApi:
                 raise api.consumption_error
             return {"G1": CONSUMPTION, "E1": []}
 
+        async def create_api_key(client, replace=False):
+            api.created_keys.append(replace)
+            if api.existing_key and not replace:
+                raise EonNextApiKeyExists(api.existing_key)
+            return "sk_live_new"
+
         target = "custom_components.eon_next_prepay.api.EonNextClient"
         return [
+            patch(f"{target}.async_create_api_key", create_api_key),
             patch(f"{target}.async_get_accounts", get_accounts),
             patch(f"{target}.async_get_balance", get_balance),
             patch(f"{target}.async_get_payments", get_payments),
@@ -119,9 +137,14 @@ def api():
         p.stop()
 
 
-async def setup_entry(hass: HomeAssistant, options: dict | None = None) -> MockConfigEntry:
+async def setup_entry(
+    hass: HomeAssistant, options: dict | None = None, data: dict | None = None
+) -> MockConfigEntry:
     entry = MockConfigEntry(
-        domain=DOMAIN, unique_id=ACCOUNT, data={CONF_REFRESH_TOKEN: "rt-1"}, options=options or {}
+        domain=DOMAIN,
+        unique_id=ACCOUNT,
+        data=data or {CONF_REFRESH_TOKEN: "rt-1"},
+        options=options or {},
     )
     entry.add_to_hass(hass)
     await hass.config_entries.async_setup(entry.entry_id)
@@ -270,3 +293,93 @@ def test_partial_newest_day_is_ignored(hass: HomeAssistant, frozen_now) -> None:
     data = MeterData()
     latest_complete_day(buckets[:1], data)
     assert data.last_day is None
+
+
+def switch_issue(hass: HomeAssistant, entry: MockConfigEntry):
+    return ir.async_get(hass).async_get_issue(DOMAIN, f"switch_to_api_key_{entry.entry_id}")
+
+
+async def test_api_key_entry_uses_key_and_has_no_issue(hass: HomeAssistant, api: FakeApi) -> None:
+    entry = await setup_entry(hass, data={CONF_API_KEY: "sk_live_x"})
+    assert entry.state is ConfigEntryState.LOADED
+    assert api.clients[-1].uses_api_key
+    assert switch_issue(hass, entry) is None
+
+
+async def test_refresh_token_entry_offers_switch_without_changing_anything(
+    hass: HomeAssistant, api: FakeApi
+) -> None:
+    entry = await setup_entry(hass)
+    assert entry.state is ConfigEntryState.LOADED
+    assert not api.clients[-1].uses_api_key
+    issue = switch_issue(hass, entry)
+    assert issue is not None and issue.is_fixable
+    # opt-in: no key is created just by updating
+    assert api.created_keys == []
+    assert entry.data == {CONF_REFRESH_TOKEN: "rt-1"}
+
+
+async def test_rotation_after_switch_does_not_restore_refresh_token(
+    hass: HomeAssistant, api: FakeApi
+) -> None:
+    entry = await setup_entry(hass)
+    hass.config_entries.async_update_entry(entry, data={CONF_API_KEY: "sk_live_new"})
+    api.clients[-1]._on_refresh_token("rt-late")
+    assert entry.data == {CONF_API_KEY: "sk_live_new"}
+
+
+async def start_repair(hass: HomeAssistant, entry: MockConfigEntry) -> tuple:
+    assert await async_setup_component(hass, "repairs", {})
+    manager = repairs_flow_manager(hass)
+    result = await manager.async_init(
+        DOMAIN, context={"issue_id": f"switch_to_api_key_{entry.entry_id}"}
+    )
+    return manager, result
+
+
+async def test_repair_switches_to_api_key(hass: HomeAssistant, api: FakeApi) -> None:
+    entry = await setup_entry(hass)
+    manager, result = await start_repair(hass, entry)
+    assert result["step_id"] == "confirm"
+    assert api.created_keys == []
+
+    result = await manager.async_configure(result["flow_id"], {})
+    assert result["step_id"] == "api_key_created"
+    assert result["description_placeholders"] == {"api_key": "sk_live_new"}
+    # saved before it's shown, in case the dialog is closed
+    assert entry.data == {CONF_API_KEY: "sk_live_new"}
+
+    result = await manager.async_configure(result["flow_id"], {})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.LOADED
+    assert api.clients[-1].uses_api_key
+    assert switch_issue(hass, entry) is None
+
+
+async def test_repair_with_existing_key_changes_nothing_unless_asked(
+    hass: HomeAssistant, api: FakeApi
+) -> None:
+    api.existing_key = "sk_live_****abcd"
+    entry = await setup_entry(hass)
+    manager, result = await start_repair(hass, entry)
+    result = await manager.async_configure(result["flow_id"], {})
+    assert result["type"] is FlowResultType.MENU
+    assert result["description_placeholders"] == {"masked": "sk_live_****abcd"}
+
+    result = await manager.async_configure(
+        result["flow_id"], {"next_step_id": "keep_refresh_token"}
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "kept_refresh_token"
+    assert api.created_keys == [False]
+    assert entry.data == {CONF_REFRESH_TOKEN: "rt-1"}
+    assert switch_issue(hass, entry) is not None
+
+
+async def test_repair_needs_a_running_entry(hass: HomeAssistant, api: FakeApi) -> None:
+    entry = await setup_entry(hass)
+    await hass.config_entries.async_unload(entry.entry_id)
+    _, result = await start_repair(hass, entry)
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "not_loaded"

@@ -1,11 +1,20 @@
-"""Client for the E.ON Next Kraken API, authenticated with an Auth0 refresh token.
+"""Client for the E.ON Next Kraken API.
 
-Auth flow (since E.ON Next moved login to Auth0):
+Two ways to log in:
+
+API key (preferred):
+    api_key -> obtainKrakenToken(APIKey) -> Kraken JWT -> "Authorization: JWT <token>"
+    The key doesn't expire, so a new JWT is simply requested whenever the old
+    one runs out. Each account has a single key, shared by every app using it.
+
+Auth0 refresh token (from a logged-in eonnext.com session):
     refresh_token -> auth.eonnext.com/oauth/token -> id_token -> Authorization header
-
-Auth0 rotates refresh tokens: every exchange returns a new one and the old one
-stops working, so callers must persist ``refresh_token`` after each refresh
-(the ``on_refresh_token`` callback fires whenever it changes).
+    Auth0 rotates refresh tokens: every exchange returns a new one and the old
+    one stops working, so callers must persist ``refresh_token`` after each
+    refresh (the ``on_refresh_token`` callback fires whenever it changes).
+    Rotation doesn't extend the login: the whole chain ends when the original
+    browser login's maximum lifetime runs out (about a week for E.ON Next).
+    A refresh-token client can create an API key with ``async_create_api_key``.
 """
 
 from __future__ import annotations
@@ -32,6 +41,25 @@ TOKEN_EXPIRY_MARGIN = 120
 TOKEN_REJECTED_CODES = {"KT-CT-1124", "KT-CT-1143"}
 # Auth0 errors meaning the refresh token itself is dead - user must log in again
 AUTH0_FATAL_ERRORS = {"invalid_grant", "unauthorized_client", "access_denied"}
+# obtainKrakenToken errors meaning the API key was rejected (bad, or replaced)
+API_KEY_REJECTED_CODES = {"KT-CT-1138", "KT-CT-1139"}
+# E.ON Next API keys look like sk_live_...
+API_KEY_PREFIX = "sk_"
+
+MUTATION_API_KEY_LOGIN = """
+mutation apiKeyLogin($input: ObtainJSONWebTokenInput!) {
+  obtainKrakenToken(input: $input) { token }
+}
+"""
+
+QUERY_EXISTING_API_KEY = """
+query existingApiKey { viewer { liveSecretKey } }
+"""
+
+# replaces any key the account already has - check QUERY_EXISTING_API_KEY first
+MUTATION_REGENERATE_API_KEY = """
+mutation regenerateApiKey { regenerateSecretKey { key } }
+"""
 
 QUERY_PREPAY_DEVICES = """
 query prepayDevices {
@@ -148,6 +176,22 @@ class EonNextApiError(EonNextError):
         self.codes = codes or set()
 
 
+class EonNextApiKeyExists(EonNextError):
+    """The account already has an API key, so one wasn't created.
+
+    ``masked`` is the API's masked form of the existing key (never usable).
+    """
+
+    def __init__(self, masked: str) -> None:
+        super().__init__("The account already has an API key")
+        self.masked = masked
+
+
+def looks_like_api_key(value: str) -> bool:
+    """True for an E.ON Next API key, as opposed to an Auth0 refresh token."""
+    return value.strip().startswith(API_KEY_PREFIX)
+
+
 def _jwt_expiry(token: str) -> float:
     """Return the exp claim of a JWT (unverified), or a short default."""
     try:
@@ -164,20 +208,65 @@ class EonNextClient:
     def __init__(
         self,
         session: aiohttp.ClientSession,
-        refresh_token: str,
+        refresh_token: str | None = None,
         on_refresh_token: Callable[[str], None] | None = None,
+        *,
+        api_key: str | None = None,
     ) -> None:
+        if not (api_key or refresh_token):
+            raise ValueError("An API key or a refresh token is required")
         self._session = session
+        self._api_key = api_key
         self._refresh_token = refresh_token
         self._on_refresh_token = on_refresh_token
+        # Kraken JWT (API key) or Auth0 id_token (refresh token)
         self._id_token: str | None = None
         self._id_token_expiry = 0.0
         self._lock = asyncio.Lock()
 
     @property
-    def refresh_token(self) -> str:
+    def uses_api_key(self) -> bool:
+        """True if this client logs in with an API key."""
+        return self._api_key is not None
+
+    @property
+    def refresh_token(self) -> str | None:
         """Latest refresh token (rotates on every token exchange)."""
         return self._refresh_token
+
+    def _authorization(self, token: str) -> str:
+        # Kraken JWTs need the JWT prefix; Auth0 id_tokens are sent bare
+        return f"JWT {token}" if self.uses_api_key else token
+
+    async def _obtain_kraken_token(self) -> None:
+        try:
+            async with self._session.post(
+                GRAPHQL_URL,
+                json={
+                    "query": MUTATION_API_KEY_LOGIN,
+                    "variables": {"input": {"APIKey": self._api_key}},
+                },
+                timeout=REQUEST_TIMEOUT,
+            ) as resp:
+                status = resp.status
+                body = await resp.json(content_type=None)
+        except (aiohttp.ClientError, TimeoutError, ValueError) as err:
+            raise EonNextApiError(f"API key login request failed: {err}") from err
+
+        if not isinstance(body, dict):
+            raise EonNextApiError(f"Unexpected API key login response (HTTP {status})")
+        errors = body.get("errors") or []
+        codes = {
+            code for err in errors if (code := (err.get("extensions") or {}).get("errorCode"))
+        }
+        if codes & API_KEY_REJECTED_CODES:
+            raise EonNextAuthError("E.ON Next rejected the API key")
+        token = ((body.get("data") or {}).get("obtainKrakenToken") or {}).get("token")
+        if errors or not token:
+            # anything else (rate limiting, an outage) is worth retrying later
+            raise EonNextApiError(f"API key login failed (HTTP {status})", codes)
+        self._id_token = token
+        self._id_token_expiry = _jwt_expiry(token)
 
     async def _exchange_refresh_token(self) -> None:
         payload = {
@@ -218,7 +307,10 @@ class EonNextClient:
                 or self._id_token == rejected
                 or time.time() > self._id_token_expiry - TOKEN_EXPIRY_MARGIN
             ):
-                await self._exchange_refresh_token()
+                if self.uses_api_key:
+                    await self._obtain_kraken_token()
+                else:
+                    await self._exchange_refresh_token()
             assert self._id_token is not None
             return self._id_token
 
@@ -231,7 +323,7 @@ class EonNextClient:
                 async with self._session.post(
                     GRAPHQL_URL,
                     json={"query": query, "variables": variables or {}},
-                    headers={"Authorization": token},
+                    headers={"Authorization": self._authorization(token)},
                     timeout=REQUEST_TIMEOUT,
                 ) as resp:
                     status = resp.status
@@ -258,6 +350,27 @@ class EonNextClient:
             return body.get("data") or {}
         raise EonNextApiError("GraphQL token rejected after refresh", codes)
 
+    # --- API key --------------------------------------------------------
+
+    async def async_get_existing_api_key(self) -> str | None:
+        """The account's existing API key, masked, or None if it has none."""
+        data = await self.graphql(QUERY_EXISTING_API_KEY)
+        return (data.get("viewer") or {}).get("liveSecretKey") or None
+
+    async def async_create_api_key(self, replace: bool = False) -> str:
+        """Create an API key for the account and return it.
+
+        E.ON only shows the key once, and each account has a single key:
+        creating one cancels the old key for every app using it. So unless
+        ``replace`` is set, this raises EonNextApiKeyExists if a key exists.
+        """
+        if not replace and (existing := await self.async_get_existing_api_key()):
+            raise EonNextApiKeyExists(existing)
+        data = await self.graphql(MUTATION_REGENERATE_API_KEY)
+        key = (data.get("regenerateSecretKey") or {}).get("key")
+        if not isinstance(key, str) or not looks_like_api_key(key):
+            raise EonNextApiError("E.ON Next didn't return an API key")
+        return key
 
     # --- prepay queries -------------------------------------------------
 

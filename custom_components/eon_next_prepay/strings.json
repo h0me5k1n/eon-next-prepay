@@ -3,30 +3,75 @@
     "step": {
       "user": {
         "title": "Connect E.ON Next",
-        "description": "Paste a refresh token from a logged-in eonnext.com session. Run `tools/get_refresh_token.py` from the integration's repository to get one.",
-        "data": { "refresh_token": "Refresh token" }
+        "description": "Paste an E.ON Next API key, or a refresh token from a logged-in eonnext.com session. See the integration's README for how to get either.",
+        "data": {
+          "token": "API key or refresh token",
+          "create_api_key": "Create an API key (recommended)"
+        },
+        "data_description": {
+          "token": "An API key starts with `sk_live_`. Anything else is treated as a refresh token from a logged-in eonnext.com session.",
+          "create_api_key": "Only applies to a refresh token. A refresh token stops working after about a week; an API key doesn't. The integration only creates a key if your account has none, and asks first if it already has one."
+        }
       },
       "reauth_confirm": {
         "title": "E.ON Next login expired",
-        "description": "The saved login no longer works. Log in to eonnext.com again and paste the new refresh token.",
-        "data": { "refresh_token": "Refresh token" }
+        "description": "The saved login no longer works. Paste your API key, or log in to eonnext.com again and paste a new refresh token.",
+        "data": {
+          "token": "API key or refresh token",
+          "create_api_key": "Create an API key (recommended)"
+        },
+        "data_description": {
+          "token": "An API key starts with `sk_live_`. Anything else is treated as a refresh token from a logged-in eonnext.com session.",
+          "create_api_key": "Only applies to a refresh token. A refresh token stops working after about a week; an API key doesn't. The integration only creates a key if your account has none, and asks first if it already has one."
+        }
       },
       "reconfigure": {
-        "title": "Replace refresh token",
-        "description": "Paste a new refresh token from a logged-in eonnext.com session.",
-        "data": { "refresh_token": "Refresh token" }
+        "title": "Replace E.ON Next login",
+        "description": "Paste an API key, or a new refresh token from a logged-in eonnext.com session.",
+        "data": {
+          "token": "API key or refresh token",
+          "create_api_key": "Create an API key (recommended)"
+        },
+        "data_description": {
+          "token": "An API key starts with `sk_live_`. Anything else is treated as a refresh token from a logged-in eonnext.com session.",
+          "create_api_key": "Only applies to a refresh token. A refresh token stops working after about a week; an API key doesn't. The integration only creates a key if your account has none, and asks first if it already has one."
+        }
+      },
+      "api_key_exists": {
+        "title": "Your account already has an API key",
+        "description": "Your E.ON Next account already has an API key (`{masked}`). Another app or integration may be using it, or it may be from an earlier setup.\n\nEach account has only one key. Creating a new one makes the existing key stop working everywhere.",
+        "menu_options": {
+          "enter_api_key": "I have the existing key - enter it",
+          "replace_api_key": "Replace it with a new key",
+          "keep_refresh_token": "Keep using the refresh token for now"
+        }
+      },
+      "enter_api_key": {
+        "title": "Enter your API key",
+        "data": {
+          "api_key": "API key"
+        }
+      },
+      "replace_api_key": {
+        "title": "Replace the API key?",
+        "description": "This creates a new API key and cancels the existing one. Anything else using the old key (another integration, an app, another Home Assistant install) will stop working until you give it the new key.\n\nYour E.ON Next website and app logins are not affected."
+      },
+      "api_key_created": {
+        "title": "API key created - save it now",
+        "description": "Your new E.ON Next API key is:\n\n`{api_key}`\n\nIt has been saved in Home Assistant. **Copy it to your password manager now** - E.ON won't show it again, and you'll need it to set this integration up on another Home Assistant install. Treat it like a password: it gives full access to your E.ON Next account.\n\nSubmit to finish."
       }
     },
     "error": {
-      "invalid_auth": "E.ON Next rejected the refresh token. It may have expired or already been used.",
+      "invalid_auth": "E.ON Next rejected it. A refresh token may have expired or already been used; an API key may have been replaced.",
       "cannot_connect": "Could not reach E.ON Next. Check the logs for details.",
-      "no_prepay_meters": "No smart meters in prepayment mode were found on this account."
+      "no_prepay_meters": "No smart meters in prepayment mode were found on this account.",
+      "not_an_api_key": "That doesn't look like an API key - they start with `sk_live_`."
     },
     "abort": {
       "already_configured": "This E.ON Next account is already set up.",
       "reauth_successful": "Login updated.",
-      "reconfigure_successful": "Refresh token updated.",
-      "wrong_account": "That refresh token belongs to a different E.ON Next account."
+      "reconfigure_successful": "Login updated.",
+      "wrong_account": "That login belongs to a different E.ON Next account."
     }
   },
   "options": {
@@ -42,20 +87,93 @@
   },
   "entity": {
     "binary_sensor": {
-      "low_credit": { "name": "Low credit" }
+      "low_credit": {
+        "name": "Low credit"
+      }
     },
     "sensor": {
-      "credit": { "name": "Credit" },
-      "debt": { "name": "Debt" },
-      "emergency_credit": { "name": "Emergency credit" },
-      "balance_updated": { "name": "Balance updated" },
-      "weekly_debt_recovery": { "name": "Weekly debt recovery" },
-      "last_top_up": { "name": "Last top-up" },
-      "last_top_up_date": { "name": "Last top-up date" },
-      "auto_top_up": { "name": "Auto top-up amount" },
-      "usage_today": { "name": "Usage today" },
-      "cost_today": { "name": "Cost today" },
-      "usage_last_day": { "name": "Usage (last full day)" }
+      "credit": {
+        "name": "Credit"
+      },
+      "debt": {
+        "name": "Debt"
+      },
+      "emergency_credit": {
+        "name": "Emergency credit"
+      },
+      "balance_updated": {
+        "name": "Balance updated"
+      },
+      "weekly_debt_recovery": {
+        "name": "Weekly debt recovery"
+      },
+      "last_top_up": {
+        "name": "Last top-up"
+      },
+      "last_top_up_date": {
+        "name": "Last top-up date"
+      },
+      "auto_top_up": {
+        "name": "Auto top-up amount"
+      },
+      "usage_today": {
+        "name": "Usage today"
+      },
+      "cost_today": {
+        "name": "Cost today"
+      },
+      "usage_last_day": {
+        "name": "Usage (last full day)"
+      }
+    }
+  },
+  "issues": {
+    "switch_to_api_key": {
+      "title": "Switch E.ON Next to an API key",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Switch to an API key?",
+            "description": "This integration is logged in with a refresh token, which E.ON Next ends about a week after you copied it from the browser. You then have to paste a new one.\n\nAn API key doesn't expire. Submitting creates one for your E.ON Next account using the current login - nothing to paste. If your account already has a key, you'll be asked what to do before anything changes."
+          },
+          "api_key_exists": {
+            "title": "Your account already has an API key",
+            "description": "Your E.ON Next account already has an API key (`{masked}`). Another app or integration may be using it, or it may be from an earlier setup.\n\nEach account has only one key. Creating a new one makes the existing key stop working everywhere.",
+            "menu_options": {
+              "enter_api_key": "I have the existing key - enter it",
+              "replace_api_key": "Replace it with a new key",
+              "keep_refresh_token": "Keep using the refresh token for now"
+            }
+          },
+          "enter_api_key": {
+            "title": "Enter your API key",
+            "data": {
+              "api_key": "API key"
+            }
+          },
+          "replace_api_key": {
+            "title": "Replace the API key?",
+            "description": "This creates a new API key and cancels the existing one. Anything else using the old key (another integration, an app, another Home Assistant install) will stop working until you give it the new key.\n\nYour E.ON Next website and app logins are not affected."
+          },
+          "api_key_created": {
+            "title": "API key created - save it now",
+            "description": "Your new E.ON Next API key is:\n\n`{api_key}`\n\nIt has been saved in Home Assistant. **Copy it to your password manager now** - E.ON won't show it again, and you'll need it to set this integration up on another Home Assistant install. Treat it like a password: it gives full access to your E.ON Next account.\n\nSubmit to finish."
+          }
+        },
+        "error": {
+          "invalid_auth": "E.ON Next rejected it. A refresh token may have expired or already been used; an API key may have been replaced.",
+          "cannot_connect": "Could not reach E.ON Next. Check the logs for details.",
+          "no_prepay_meters": "No smart meters in prepayment mode were found on this account.",
+          "not_an_api_key": "That doesn't look like an API key - they start with `sk_live_`."
+        },
+        "abort": {
+          "already_switched": "This integration already uses an API key.",
+          "not_loaded": "The integration isn't running, probably because its login has already expired. Use the re-authentication prompt instead, which can also create an API key.",
+          "kept_refresh_token": "Nothing was changed. You can switch to an API key later from Repairs.",
+          "create_failed": "E.ON Next didn't create an API key. Nothing was changed - check the logs and try again later.",
+          "wrong_account": "That API key belongs to a different E.ON Next account."
+        }
+      }
     }
   }
 }

@@ -8,10 +8,10 @@ from typing import Any
 from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.core import HomeAssistant
 
-from .const import CONF_REFRESH_TOKEN
+from .const import CONF_API_KEY, CONF_REFRESH_TOKEN
 from .coordinator import EonNextPrepayConfigEntry
 
-TO_REDACT = {CONF_REFRESH_TOKEN, "account_number", "mpxn", "serial", "device_id"}
+TO_REDACT = {CONF_API_KEY, CONF_REFRESH_TOKEN, "account_number", "mpxn", "serial", "device_id"}
 
 
 async def async_get_config_entry_diagnostics(

@@ -1,17 +1,24 @@
 """Run every API call the integration makes against a real account and show the results.
 
-Uses the integration's own client, so it checks the real code paths: token
-refresh, prepay meter discovery, balance, top-ups, auto top-up, telemetry and
-daily consumption.
+Uses the integration's own client, so it checks the real code paths: login
+(API key or refresh token), prepay meter discovery, balance, top-ups, auto
+top-up, telemetry and daily consumption.
 
-The refresh token is spent on first use. The rotated one is written to the token
-file straight away (mode 600, gitignored), so re-run with the same file, or
-paste its contents into Home Assistant - don't reuse the original token.
+Give it an API key (sk_live_...) or a refresh token. A refresh token is spent on
+first use. The rotated one is written to the token file straight away (mode 600,
+gitignored), so re-run with the same file, or paste its contents into Home
+Assistant - don't reuse the original token, and don't use a token file whose
+chain Home Assistant is also using (reusing an old token ends the login).
+
+--create-api-key creates an API key from a refresh token, only if the account
+has none, prints it once and saves it to the token file in place of the token.
 
 Usage (from the repo root, with the test venv):
-    .venv/bin/python tools/smoke_test.py                   # prompts for the token
+    .venv/bin/python tools/smoke_test.py                   # prompts for the key/token
     EON_REFRESH_TOKEN=... .venv/bin/python tools/smoke_test.py
-    .venv/bin/python tools/smoke_test.py --token-file eon.token   # reuse saved token
+    EON_API_KEY=sk_live_... .venv/bin/python tools/smoke_test.py
+    .venv/bin/python tools/smoke_test.py --token-file eon.token   # reuse saved key/token
+    .venv/bin/python tools/smoke_test.py --create-api-key
 
 Account numbers, meter points, serials and device IDs are masked so the output
 can be shared.
@@ -36,9 +43,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from custom_components.eon_next_prepay.api import (  # noqa: E402
     EonNextApiError,
+    EonNextApiKeyExists,
     EonNextAuthError,
     EonNextClient,
     _jwt_expiry,
+    looks_like_api_key,
 )
 from custom_components.eon_next_prepay.coordinator import find_prepay_meters  # noqa: E402
 
@@ -82,25 +91,46 @@ def save_token(path: Path, token: str) -> None:
     tmp.replace(path)
 
 
-async def run(refresh_token: str, token_file: Path) -> int:
+async def run(token: str, token_file: Path, create_api_key: bool = False) -> int:
     rotations = 0
 
-    def on_rotate(token: str) -> None:
+    def on_rotate(new_token: str) -> None:
         nonlocal rotations
         rotations += 1
-        save_token(token_file, token)
+        save_token(token_file, new_token)
 
     async with aiohttp.ClientSession() as session:
-        client = EonNextClient(session, refresh_token, on_rotate)
+        if looks_like_api_key(token):
+            client = EonNextClient(session, api_key=token)
+        else:
+            client = EonNextClient(session, token, on_rotate)
         try:
             accounts = await client.async_get_accounts()
         except EonNextAuthError as err:
-            print(f"Refresh token rejected: {err}")
+            print(f"Login rejected: {err}")
             return 1
 
-        print(f"Token refresh OK. Refresh token rotated: {'yes' if rotations else 'no'} "
-              f"(saved to {token_file})")
-        print(f"id_token lifetime: ~{(_jwt_expiry(client._id_token or '') - time.time()) / 60:.0f} min")
+        if client.uses_api_key:
+            print("API key login OK.")
+        else:
+            print(f"Token refresh OK. Refresh token rotated: {'yes' if rotations else 'no'} "
+                  f"(saved to {token_file})")
+        print(f"Access token lifetime: ~{(_jwt_expiry(client._id_token or '') - time.time()) / 60:.0f} min")
+
+        if create_api_key:
+            if client.uses_api_key:
+                print("--create-api-key needs a refresh token, not an API key")
+                return 1
+            try:
+                key = await client.async_create_api_key()
+            except EonNextApiKeyExists as err:
+                print(f"Not creating an API key: the account already has one ({err.masked}). "
+                      "Creating another would cancel it for everything using it.")
+                return 1
+            save_token(token_file, key)
+            print(f"\nAPI key created (saved to {token_file}). E.ON won't show it again:\n\n    {key}\n")
+            return 0
+
         show("Accounts / meters", accounts)
 
         meters, debt_rates = find_prepay_meters(accounts)
@@ -172,27 +202,30 @@ async def run(refresh_token: str, token_file: Path) -> int:
                     print(f"   today so far: {len(today)} slots, "
                           f"{sum(float(b['value']) for b in today):.3f} {meter.consumption_units}")
 
-    print(f"\nDone. Latest refresh token is in {token_file} - use it next run or paste it into HA.")
+    if not client.uses_api_key:
+        print(f"\nDone. Latest refresh token is in {token_file} - use it next run or paste it into HA.")
     return 0
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--token-file", type=Path, default=Path("eon.token"),
-                        help="where the rotated token is kept (default: eon.token); read from if it exists "
-                             "and EON_REFRESH_TOKEN is not set")
+                        help="where the API key or rotated token is kept (default: eon.token); read from "
+                             "if it exists and neither EON_API_KEY nor EON_REFRESH_TOKEN is set")
+    parser.add_argument("--create-api-key", action="store_true",
+                        help="create an API key from the refresh token (only if the account has none)")
     args = parser.parse_args()
 
-    token = os.environ.get("EON_REFRESH_TOKEN", "").strip()
+    token = (os.environ.get("EON_API_KEY") or os.environ.get("EON_REFRESH_TOKEN") or "").strip()
     if not token and args.token_file.exists():
         token = args.token_file.read_text().strip()
-        print(f"Using refresh token from {args.token_file}")
+        print(f"Using the {'API key' if looks_like_api_key(token) else 'refresh token'} from {args.token_file}")
     if not token:
         # getpass keeps it out of shell history and the terminal scrollback
-        token = getpass.getpass("E.ON Next refresh token: ").strip()
+        token = getpass.getpass("E.ON Next API key or refresh token: ").strip()
     if not token:
-        sys.exit("No refresh token given")
-    sys.exit(asyncio.run(run(token, args.token_file)))
+        sys.exit("No API key or refresh token given")
+    sys.exit(asyncio.run(run(token, args.token_file, args.create_api_key)))
 
 
 if __name__ == "__main__":
