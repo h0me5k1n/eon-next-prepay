@@ -102,6 +102,7 @@ E.ON takes the prepay balance snapshot once a day, at midnight, so the credit fi
 Tested against a real account with smart prepay electricity and gas meters:
 
 - Token refresh and rotation work, and the ID token lasts about an hour.
+- Logging in with an API key works, from both setup and re-authentication.
 - An unknown API key is rejected with `KT-CT-1139`.
 - Both prepay meters were found, and balances matched the E.ON app.
 - Balances and top-up amounts are in pence.
@@ -110,7 +111,6 @@ Tested against a real account with smart prepay electricity and gas meters:
 Still assumed:
 
 - A refresh-token login ends about a week after the browser login, however often it's renewed. Other E.ON Next integrations report the same, and so does the test account, but E.ON doesn't publish the limit.
-- Creating an API key and logging in with it work as other E.ON Next integrations report. Not yet run against the test account.
 
 Because the test account didn't have them:
 
