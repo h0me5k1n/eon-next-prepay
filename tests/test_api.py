@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass, field
+import json
 from typing import Any
 
 import pytest
@@ -19,13 +21,30 @@ from custom_components.eon_next_prepay.const import AUTH0_TOKEN_URL, GRAPHQL_URL
 from .conftest import make_jwt
 
 
+@dataclass
+class RawBody:
+    text: str
+    content_type: str = "text/html"
+    headers: dict[str, str] = field(default_factory=dict)
+
+
 class FakeResponse:
+    """A JSON response, or a raw text one when the body is a RawBody."""
+
     def __init__(self, status: int, body: Any) -> None:
         self.status = status
         self._body = body
+        if isinstance(body, RawBody):
+            self.content_type = body.content_type
+            self.headers = body.headers
+        else:
+            self.content_type = "application/json"
+            self.headers = {}
 
-    async def json(self, content_type: str | None = None) -> Any:
-        return self._body
+    async def text(self) -> str:
+        if isinstance(self._body, RawBody):
+            return self._body.text
+        return json.dumps(self._body)
 
     async def __aenter__(self) -> FakeResponse:
         return self
@@ -264,3 +283,34 @@ def test_looks_like_api_key() -> None:
 def test_client_needs_a_credential() -> None:
     with pytest.raises(ValueError):
         EonNextClient(FakeSession(lambda m, u, k: (200, {})))  # type: ignore[arg-type]
+
+
+CLOUDFRONT_403 = """<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML><HEAD><TITLE>ERROR: The request could not be satisfied</TITLE></HEAD><BODY>
+<H1>403 ERROR</H1><H2>The request could not be satisfied.</H2>
+<HR noshade size="1px">Request blocked.</BODY></HTML>"""
+
+
+async def test_html_error_page_is_explained() -> None:
+    def handler(method: str, url: str, kwargs: dict) -> tuple[int, Any]:
+        return 403, RawBody(CLOUDFRONT_403, headers={"X-Cache": "Error from cloudfront"})
+
+    client = EonNextClient(FakeSession(handler), api_key="sk_live_x")  # type: ignore[arg-type]
+    with pytest.raises(EonNextApiError) as err:
+        await client.async_get_accounts()
+    # retryable, not a re-auth
+    assert not isinstance(err.value, EonNextAuthError)
+    message = str(err.value)
+    assert "HTTP 403" in message
+    assert "text/html" in message
+    assert "X-Cache: Error from cloudfront" in message
+    assert "403 ERROR The request could not be satisfied. Request blocked." in message
+    assert "<" not in message
+
+
+async def test_empty_response_is_explained() -> None:
+    client = EonNextClient(
+        FakeSession(lambda m, u, k: (502, RawBody("", content_type=""))), api_key="sk_live_x"  # type: ignore[arg-type]
+    )
+    with pytest.raises(EonNextApiError, match=r"HTTP 502, no content type\): \(empty\)"):
+        await client.async_get_accounts()

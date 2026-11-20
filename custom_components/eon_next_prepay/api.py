@@ -23,6 +23,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 import time
 from collections.abc import Callable
 from datetime import datetime
@@ -192,6 +193,36 @@ def looks_like_api_key(value: str) -> bool:
     return value.strip().startswith(API_KEY_PREFIX)
 
 
+# how much of a non-JSON response to put in the error message
+SNIPPET_LENGTH = 200
+
+
+def _snippet(text: str) -> str:
+    """Readable start of an HTML or text error page, for log messages."""
+    text = re.sub(r"<(script|style)\b.*?</\1>", " ", text, flags=re.S | re.I)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = " ".join(text.split())
+    return text[:SNIPPET_LENGTH] + ("…" if len(text) > SNIPPET_LENGTH else "") or "(empty)"
+
+
+async def _read_json(resp: aiohttp.ClientResponse) -> Any:
+    """Parse a JSON response, explaining what came back if it isn't JSON.
+
+    E.ON's CDN answers outages and blocked requests with an HTML page, so the
+    status, content type, CDN verdict and the page's text say which it was.
+    """
+    text = await resp.text()
+    try:
+        return json.loads(text)
+    except ValueError:
+        details = [f"HTTP {resp.status}", resp.content_type or "no content type"]
+        if cache := resp.headers.get("X-Cache"):
+            details.append(f"X-Cache: {cache}")
+        raise EonNextApiError(
+            f"E.ON Next sent a response that isn't JSON ({', '.join(details)}): {_snippet(text)}"
+        ) from None
+
+
 def _jwt_expiry(token: str) -> float:
     """Return the exp claim of a JWT (unverified), or a short default."""
     try:
@@ -249,7 +280,7 @@ class EonNextClient:
                 timeout=REQUEST_TIMEOUT,
             ) as resp:
                 status = resp.status
-                body = await resp.json(content_type=None)
+                body = await _read_json(resp)
         except (aiohttp.ClientError, TimeoutError, ValueError) as err:
             raise EonNextApiError(f"API key login request failed: {err}") from err
 
@@ -279,7 +310,7 @@ class EonNextClient:
                 AUTH0_TOKEN_URL, json=payload, timeout=REQUEST_TIMEOUT
             ) as resp:
                 status = resp.status
-                body = await resp.json(content_type=None)
+                body = await _read_json(resp)
         except (aiohttp.ClientError, TimeoutError, ValueError) as err:
             raise EonNextApiError(f"Token refresh request failed: {err}") from err
 
@@ -327,7 +358,7 @@ class EonNextClient:
                     timeout=REQUEST_TIMEOUT,
                 ) as resp:
                     status = resp.status
-                    body = await resp.json(content_type=None)
+                    body = await _read_json(resp)
             except (aiohttp.ClientError, TimeoutError, ValueError) as err:
                 raise EonNextApiError(f"GraphQL request failed: {err}") from err
 
